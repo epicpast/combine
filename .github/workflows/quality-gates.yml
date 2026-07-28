@@ -1,0 +1,87 @@
+name: quality-gates
+
+# Merge-time quality gates: a thin caller of the attested-delivery/.github central
+# reusable workflows. Each gate normalizes on SARIF and lands in the
+# code-scanning hub; the "Code scanning results" required check is the merge
+# gate. Pins resolve to the central repo's default-branch HEAD at wiring time;
+# Dependabot (github-actions ecosystem) keeps them fresh.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly Monday, scattered minute (never :00).
+    - cron: "22 7 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Required check context: "pin-check / pin-check" — asserts every `uses:`
+  # reference is pinned to a full 40-char commit SHA.
+  pin-check:
+    permissions:
+      contents: read
+    # attested-delivery/.github main @ ca91728 (2026-07-12)
+    uses: attested-delivery/.github/.github/workflows/pin-check.yml@ca91728c87beb08742325b4ed4d06fcfb261435b
+
+  # SAST — CodeQL (Go). Go has no "none" build mode (unlike Rust/JS) — it
+  # only supports autobuild or manual, so this must build the module.
+  # Previously gated on a detect-go-source job (removed) for the window
+  # before this repo had any .go files; real Go source has existed since
+  # Story #2, so the gate is stale and dropped here (Task #40).
+  sast:
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+      packages: read
+    # attested-delivery/.github main @ ca91728 (2026-07-12)
+    uses: attested-delivery/.github/.github/workflows/reusable-sast-codeql.yml@ee1f93b566abc109efa0588d3d5308b4dd4a7492
+    with:
+      languages: go
+      build-mode: autobuild
+
+  # SCA — OSV-Scanner (Go modules) plus dependency review (PR merge gate).
+  sca:
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+      pull-requests: write
+    # attested-delivery/.github main @ ca91728 (2026-07-12)
+    uses: attested-delivery/.github/.github/workflows/reusable-sca-osv.yml@ca91728c87beb08742325b4ed4d06fcfb261435b
+    with:
+      fail-on-severity: high
+
+  # Supply-chain posture — OpenSSF Scorecard. Requires the default branch, so
+  # it does not run on pull_request.
+  posture:
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    permissions:
+      security-events: write
+      id-token: write
+      contents: read
+      actions: read
+    # attested-delivery/.github main @ ca91728 (2026-07-12)
+    uses: attested-delivery/.github/.github/workflows/reusable-scorecard.yml@ca91728c87beb08742325b4ed4d06fcfb261435b
+
+  # IaC + license — Trivy filesystem scan. No image-ref yet: go-htmx has no
+  # Dockerfile/container pipeline at this stage.
+  trivy:
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      packages: read
+    # attested-delivery/.github main @ ee1f93b (2026-07-13)
+    uses: attested-delivery/.github/.github/workflows/reusable-trivy.yml@ee1f93b566abc109efa0588d3d5308b4dd4a7492
+    with:
+      scan-iac: true

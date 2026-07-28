@@ -1,0 +1,131 @@
+package notes
+
+import (
+	"fmt"
+
+	"github.com/attested-delivery/go-htmx/internal/platform/db/sqlc"
+	"github.com/attested-delivery/go-htmx/internal/web/templates"
+)
+
+// Page is the feature's whole page: a create form, a live notes-count
+// badge, and the notes list itself.
+//
+// The SSE connection lives on its own stable, empty #notes-stream
+// element rather than on #notes-list itself. #notes-list is the
+// hx-target unnamed broadcasts swap into (via #notes-stream's
+// hx-target/hx-swap), but it is never itself OOB-replaced — if it were
+// also the connecting element, a full-list OOB refresh of it would
+// detach and reconnect (or outright kill) the very SSE connection
+// delivering that refresh. Keeping the two separate lets
+// handleStream's initial sync message (see handler.go) safely
+// OOB-replace #notes-list's contents without disturbing the connection.
+//
+// This page render and the SSE connection opening are two separate
+// round-trips (render, then the browser parses HTML and opens
+// EventSource) — a note created by another client in that gap would be
+// silently missed if the server only ever pushed incremental updates.
+// handleStream closes that gap by sending a full-state sync fragment
+// (see Sync below) as the first SSE message, before any incremental
+// broadcast — so the list reflects a description of "here's everything
+// as of when your connection actually opened," not "everything from
+// stale page-load".
+templ Page(notes []sqlc.Note) {
+	@templates.Layout("go-htmx — notes") {
+		<div class="space-y-8">
+			<header class="space-y-1">
+				<h1 class="text-2xl font-semibold tracking-tight">Notes</h1>
+				<p class="text-sm text-gray-500 dark:text-gray-400">Example feature: a live, multi-client notes list over Server-Sent Events (Story #4, AD-4's real-time layer).</p>
+			</header>
+			<form
+				id="note-form"
+				hx-post="/notes"
+				hx-swap="none"
+				class="flex gap-2"
+			>
+				<input
+					type="text"
+					name="body"
+					placeholder="Write a note…"
+					autocomplete="off"
+					required
+					class="flex-1 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm placeholder:text-gray-400 focus:border-gray-500 focus:outline-none focus:ring-1 focus:ring-gray-500 dark:border-gray-700 dark:bg-gray-800 dark:placeholder:text-gray-500"
+				/>
+				<button
+					type="submit"
+					class="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+				>Add</button>
+			</form>
+			<p>
+				<span id="notes-count" hx-swap-oob="true" class={ noteCountClasses }>{ noteCountLabel(int64(len(notes))) }</span>
+			</p>
+			<div
+				id="notes-stream"
+				hx-sse:connect="/notes/stream"
+				hx-target="#notes-list"
+				hx-swap="afterbegin"
+				class="hidden"
+			></div>
+			<div id="notes-list" class="space-y-3">
+				for _, n := range notes {
+					@NoteRow(n)
+				}
+			</div>
+		</div>
+	}
+}
+
+// NoteRow renders one note. Used both for the initial page load (inside
+// Page) and, individually, as the primary swap content of an SSE
+// broadcast (inside Broadcast below) — same markup either way, so a
+// freshly created note looks identical to one rendered on first load.
+templ NoteRow(n sqlc.Note) {
+	<div class="note rounded-lg border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-800" id={ fmt.Sprintf("note-%d", n.ID) }>
+		<p class="text-sm leading-relaxed">{ n.Body }</p>
+		<time class="mt-1 block text-xs text-gray-400 dark:text-gray-500">{ n.CreatedAt.Format("2006-01-02 15:04:05") }</time>
+	</div>
+}
+
+// Broadcast is the fragment published to every SSE subscriber on each
+// new note: the note itself (swapped into #notes-list per Page's
+// hx-target/hx-swap="afterbegin") plus an out-of-band-swapped
+// #notes-count update — one SSE message updating two independent
+// regions of the page, the multi-region OOB pattern Story #4/Task #21
+// calls for. htmx's core OOB swap logic (not the SSE extension) is what
+// extracts the hx-swap-oob element and routes it separately; the SSE
+// extension just hands the whole fragment to that same core swap path
+// unnamed messages always use.
+templ Broadcast(n sqlc.Note, count int64) {
+	@NoteRow(n)
+	<span id="notes-count" hx-swap-oob="true" class={ noteCountClasses }>{ noteCountLabel(count) }</span>
+}
+
+// Sync is the first message handleStream sends on every new SSE
+// connection: a full-state OOB refresh of #notes-list (mode
+// "innerHTML" — replaces children, not the element itself, since
+// #notes-list isn't the connecting element) plus the count badge. It
+// closes the page-render-to-SSE-connect gap Page's doc comment
+// describes: whatever handleStream's snapshot query sees becomes the
+// list, superseding anything server-rendered into the initial page
+// load that's now stale.
+templ Sync(notes []sqlc.Note, count int64) {
+	<div id="notes-list" hx-swap-oob="innerHTML">
+		for _, n := range notes {
+			@NoteRow(n)
+		}
+	</div>
+	<span id="notes-count" hx-swap-oob="true" class={ noteCountClasses }>{ noteCountLabel(count) }</span>
+}
+
+// noteCountClasses is shared by every place the #notes-count badge is
+// rendered (Page's initial render, Broadcast, Sync) — hx-swap-oob="true"
+// (unlike Sync's own innerHTML-mode #notes-list) replaces the whole
+// element, so every one of these needs its own copy of the classes, not
+// just the first.
+const noteCountClasses = "inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600 dark:bg-gray-800 dark:text-gray-300"
+
+func noteCountLabel(count int64) string {
+	if count == 1 {
+		return "1 note"
+	}
+	return fmt.Sprintf("%d notes", count)
+}
